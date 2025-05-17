@@ -115,7 +115,7 @@ class SegmentationCameraActivity : ComponentActivity(), TextToSpeech.OnInitListe
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // activity_main.xml must include an ImageView with id "imageView".
-        setContentView(R.layout.activity_main)
+        setContentView(R.layout.activity_test)
         imageView = findViewById(R.id.imageView)
         yuvToRgbConverter = YuvToRgbConverter(this)
 
