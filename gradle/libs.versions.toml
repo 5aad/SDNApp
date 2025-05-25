@@ -1,6 +1,7 @@
 [versions]
 agp = "8.7.3"
 cameraView = "1.4.2"
+coreVersion = "1.41.0"
 kotlin = "2.0.0"
 coreKtx = "1.15.0"
 junit = "4.13.2"
@@ -19,15 +20,13 @@ playServicesMaps = "19.2.0"
 playServicesPlaces = "17.1.0"
 rxandroid = "2.1.1"
 rxjava = "2.2.14"
-tensorflowLite = "2.14.0"
-tensorflowLiteGpu = "2.14.0"
-tensorflowLiteGpuDelegatePlugin = "0.4.2"
 
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraView" }
 androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "cameraView" }
 androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "cameraView" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+core-v1410 = { module = "com.google.ar:core", version.ref = "coreVersion" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
@@ -51,9 +50,6 @@ play-services-maps = { module = "com.google.android.gms:play-services-maps", ver
 play-services-places = { module = "com.google.android.gms:play-services-places", version.ref = "playServicesPlaces" }
 rxandroid = { module = "io.reactivex.rxjava2:rxandroid", version.ref = "rxandroid" }
 rxjava = { module = "io.reactivex.rxjava2:rxjava", version.ref = "rxjava" }
-tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tensorflowLite" }
-tensorflow-lite-gpu = { module = "org.tensorflow:tensorflow-lite-gpu", version.ref = "tensorflowLiteGpu" }
-tensorflow-lite-gpu-delegate-plugin = { module = "org.tensorflow:tensorflow-lite-gpu-delegate-plugin", version.ref = "tensorflowLiteGpuDelegatePlugin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

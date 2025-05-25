@@ -168,6 +168,19 @@ class MainActivity : AppCompatActivity(),
                     mask.setImageBitmap(result.bitmapMask)
                     mask.invalidate()
                     labels.text = result.seenObjects
+
+                    val tolerance = 40            // px you consider “safe”
+                    when {
+                        result.centerOffsetPx >  tolerance ->
+                            Toast.makeText(this,
+                                "You’re drifting right – move left ⟵",
+                                Toast.LENGTH_SHORT).show()
+
+                        result.centerOffsetPx < -tolerance ->
+                            Toast.makeText(this,
+                                "You’re drifting left – move right ⟶",
+                                Toast.LENGTH_SHORT).show()
+                    }
                 }
         )
 

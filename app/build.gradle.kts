@@ -40,9 +40,7 @@ android {
 }
 
 dependencies {
-    implementation (libs.tensorflow.lite.gpu.delegate.plugin)
-    implementation (libs.tensorflow.lite)
-    implementation (libs.tensorflow.lite.gpu)
+    implementation (libs.core.v1410)
     implementation (libs.rxandroid)
     implementation (libs.rxjava)
     implementation (libs.play.services.maps)

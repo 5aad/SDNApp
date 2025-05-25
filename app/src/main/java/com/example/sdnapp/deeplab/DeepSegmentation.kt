@@ -13,188 +13,204 @@ import io.reactivex.subjects.PublishSubject
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.OnnxTensor
-import java.io.ByteArrayOutputStream
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
 import java.nio.FloatBuffer
 import kotlin.system.measureTimeMillis
 import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
-const val TAG = "DeeplabAndroid"
+
 /**
- * Segmentation analyzer that runs an **ONNX** model (`model.onnx`) whose output tensor has
- * shape **[1, 10, 640, 800]** (N × C × H × W) and whose colours / labels are defined in
- * **assets/class_color.csv**.
+ * Real‑time semantic segmentation using an **ONNX** model (`model.onnx`).
+ *
+ *  * **Input**: 640×800 RGB (NCHW)
+ *  * **Classes**: 10 (see `class_color.csv`)
+ *  * **Output**: Mask bitmap + per‑frame centre‑line offset so that the UI can warn the user
  */
 class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Constants                                                               */
-    /*───────────────────────────────────────────────────────────────────────────*/
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Constants                                                           */
+    /*──────────────────────────────────────────────────────────────────────*/
     companion object {
         private const val IMAGE_MEAN = 128
         private const val IMAGE_STD = 128f
-        private const val DIM_BATCH = 1
-        private const val DIM_CHANNELS = 3
-        private const val DIM_HEIGHT = 640   // model input height
-        private const val DIM_WIDTH  = 800   // model input width
-        private const val OUTPUT_LABELS = 10 // number of semantic classes
+        private const val H = 640        // input height
+        private const val W = 800        // input width
+        private const val C = 3          // RGB
+        private const val NUM_CLASSES = 10
         private const val MODEL_FILENAME = "model.onnx"
         private const val CLASS_COLOR_FILE = "class_colors.csv"
+        private const val SIDEWALK_ID = 2 // from CSV (row 2)
+        private const val TAG = "DeepSegmentation"
     }
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Data‑holder                                                             */
-    /*───────────────────────────────────────────────────────────────────────────*/
-    data class SegmentationResults(val bitmapMask: Bitmap?, val seenObjects: String)
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Result DTO                                                          */
+    /*──────────────────────────────────────────────────────────────────────*/
+    data class SegmentationResults(
+        val bitmapMask: Bitmap?,           // overlay with class colours + centre line
+        val seenObjects: String,           // text summary of objects detected
+        val centerOffsetPx: Int            // + => user/camera is left of centre‑line, − => right
+    )
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  ONNX Runtime                                                            */
-    /*───────────────────────────────────────────────────────────────────────────*/
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  ONNX Runtime setup                                                  */
+    /*──────────────────────────────────────────────────────────────────────*/
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Buffers & lookup tables                                                 */
-    /*───────────────────────────────────────────────────────────────────────────*/
-    private val imgData = FloatArray(DIM_BATCH * DIM_CHANNELS * DIM_HEIGHT * DIM_WIDTH)
-    private val segmentBits = Array(DIM_WIDTH) { IntArray(DIM_HEIGHT) }
-    private val segmentColors = IntArray(OUTPUT_LABELS)
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Buffers & look‑ups                                                  */
+    /*──────────────────────────────────────────────────────────────────────*/
+    private val imgData = FloatArray(1 * C * H * W)
+    private val segmentBits = Array(W) { IntArray(H) }
+    private val segmentColors = IntArray(NUM_CLASSES)
     private val labelMap = mutableMapOf<Int, String>()
-
     private val resultNotifier = PublishSubject.create<SegmentationResults>()
 
     init {
-        /*─────────────────────────────── load ONNX model ───────────────────────*/
-        val modelBytes = assets.open(MODEL_FILENAME).readBytes()
-        session = env.createSession(modelBytes)
+        /*── load ONNX model ───────────────────────────────────────────────*/
+        val bytes = assets.open(MODEL_FILENAME).readBytes()
+        session = env.createSession(bytes)
 
-        /*─────────────────────────────── load colour CSV ───────────────────────*/
-        BufferedReader(InputStreamReader(assets.open(CLASS_COLOR_FILE))).use { reader ->
-            reader.readLine() // skip header
-            reader.lineSequence().filter { it.isNotBlank() }.forEach { line ->
-                val parts = line.split(',')
-                val id = parts[0].toInt()
-                val r = parts[1].toInt(); val g = parts[2].toInt(); val b = parts[3].toInt()
-                val name = parts[4].trim()
-                if (id in 0 until OUTPUT_LABELS) {
-                    segmentColors[id] = Color.argb(120, r, g, b) // semi‑transparent
-                    labelMap[id] = name
+        /*── read CSV for colours / labels ─────────────────────────────────*/
+        BufferedReader(InputStreamReader(assets.open(CLASS_COLOR_FILE))).use { br ->
+            br.readLine() // header
+            br.lineSequence().filter { it.isNotBlank() }.forEach { line ->
+                val (idStr, rStr, gStr, bStr, name) = line.split(',')
+                val id = idStr.toInt()
+                if (id in 0 until NUM_CLASSES) {
+                    segmentColors[id] = Color.argb(120, rStr.toInt(), gStr.toInt(), bStr.toInt())
+                    labelMap[id] = name.trim()
                 }
             }
         }
         if (segmentColors[0] == 0) segmentColors[0] = Color.TRANSPARENT // background
     }
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Public API                                                              */
-    /*───────────────────────────────────────────────────────────────────────────*/
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Public stream                                                       */
+    /*──────────────────────────────────────────────────────────────────────*/
     fun resultsObserver(): Flowable<SegmentationResults> =
         resultNotifier.toFlowable(BackpressureStrategy.LATEST)
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Analyzer implementation                                                 */
-    /*───────────────────────────────────────────────────────────────────────────*/
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Analyzer implementation                                             */
+    /*──────────────────────────────────────────────────────────────────────*/
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(image: ImageProxy) {
         try {
-            val srcWidth = image.width
-            val srcHeight = image.height
+            val srcW = image.width
+            val srcH = image.height
 
-            /*────────── convert Camera frame → Bitmap (resized to model input) ─────────*/
-            val jpegBytes = NV21toJPEG(
-                DeepUtils.YUV420toNV21(image.image), srcWidth, srcHeight
-            )
-            val inputBitmap = tfResizeBilinear(
-                BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size),
-                DIM_WIDTH, DIM_HEIGHT, image.imageInfo.rotationDegrees
+            /*── convert Camera frame (YUV) → Bitmap at model size ─────────*/
+            val jpgBytes = NV21toJPEG(DeepUtils.YUV420toNV21(image.image), srcW, srcH)
+            val bmpInput = tfResizeBilinear(
+                BitmapFactory.decodeByteArray(jpgBytes, 0, jpgBytes.size),
+                W, H, image.imageInfo.rotationDegrees
             ) ?: return
 
-            /*────────── prepare FloatBuffer in NCHW order ─────────*/
-            val pixels = IntArray(DIM_WIDTH * DIM_HEIGHT)
-            inputBitmap.getPixels(pixels, 0, DIM_WIDTH, 0, 0, DIM_WIDTH, DIM_HEIGHT)
-            inputBitmap.recycle()
-            var idx = 0
-            // R channel
-            for (y in 0 until DIM_HEIGHT) for (x in 0 until DIM_WIDTH) {
-                val p = pixels[y * DIM_WIDTH + x]
-                imgData[idx++] = (((p shr 16) and 0xFF) - IMAGE_MEAN) / IMAGE_STD
+            /*── fill imgData[] in NCHW order ───────────────────────────────*/
+            val pixels = IntArray(W * H)
+            bmpInput.getPixels(pixels, 0, W, 0, 0, W, H)
+            bmpInput.recycle()
+            var i = 0
+            for (y in 0 until H) for (x in 0 until W) {
+                val p = pixels[y * W + x]
+                imgData[i++] = (((p shr 16) and 0xFF) - IMAGE_MEAN) / IMAGE_STD // R
             }
-            // G channel
-            for (y in 0 until DIM_HEIGHT) for (x in 0 until DIM_WIDTH) {
-                val p = pixels[y * DIM_WIDTH + x]
-                imgData[idx++] = (((p shr 8) and 0xFF) - IMAGE_MEAN) / IMAGE_STD
+            for (y in 0 until H) for (x in 0 until W) {
+                val p = pixels[y * W + x]
+                imgData[i++] = (((p shr 8) and 0xFF) - IMAGE_MEAN) / IMAGE_STD  // G
             }
-            // B channel
-            for (y in 0 until DIM_HEIGHT) for (x in 0 until DIM_WIDTH) {
-                val p = pixels[y * DIM_WIDTH + x]
-                imgData[idx++] = (((p) and 0xFF) - IMAGE_MEAN) / IMAGE_STD
+            for (y in 0 until H) for (x in 0 until W) {
+                val p = pixels[y * W + x]
+                imgData[i++] = (((p) and 0xFF) - IMAGE_MEAN) / IMAGE_STD        // B
             }
 
-            /*────────── run inference ─────────*/
-            val inputName = session.inputNames.iterator().next()
+            /*── run inference ─────────────────────────────────────────────*/
+            val inputName = session.inputNames.first()
             val inputTensor = OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(imgData),
-                longArrayOf(1, 3, DIM_HEIGHT.toLong(), DIM_WIDTH.toLong())
+                env, FloatBuffer.wrap(imgData), longArrayOf(1, 3, H.toLong(), W.toLong())
             )
-            val inferenceTime = measureTimeMillis {
-                val outputs = session.run(mapOf(inputName to inputTensor))
-                val rawOutput = outputs[0].value as Array<Array<Array<FloatArray>>> // [1][10][640][800]
-                val probs = rawOutput[0]                                           // strip batch dim → [10][640][800]
+            val infMs = measureTimeMillis {
+                val out = session.run(mapOf(inputName to inputTensor))
+                val logits = (out[0].value as Array<Array<Array<FloatArray>>>)[0] // [C][H][W]
 
-                /*────────── arg‑max over channels ─────────*/
-                val maskBitmap = createBitmap(DIM_WIDTH, DIM_HEIGHT)
-                val seen = mutableMapOf<Int, Int>()
+                /*── arg‑max + build colour mask ─────────────────────────*/
+                val maskBmp = createBitmap(W, H)
+                val canvas = Canvas(maskBmp)
+                val pnt = Paint().apply { strokeWidth = 1f }
 
-                for (y in 0 until DIM_HEIGHT) {
-                    for (x in 0 until DIM_WIDTH) {
-                        var bestLabel = 0
-                        var bestScore = Float.NEGATIVE_INFINITY
-                        for (c in 0 until OUTPUT_LABELS) {
-                            val score = probs[c][y][x]  // <-- fixed: Float, not FloatArray
-                            if (score > bestScore) {
-                                bestScore = score
-                                bestLabel = c
-                            }
+                for (y in 0 until H) {
+                    for (x in 0 until W) {
+                        var best = 0; var bestScore = Float.NEGATIVE_INFINITY
+                        for (c in 0 until NUM_CLASSES) {
+                            val s = logits[c][y][x]
+                            if (s > bestScore) { bestScore = s; best = c }
                         }
-                        segmentBits[x][y] = bestLabel
-                        if (bestLabel != 0) seen[bestLabel] = (seen[bestLabel] ?: 0) + 1
-                        maskBitmap[x, y] = segmentColors[bestLabel]
+                        segmentBits[x][y] = best
+                        pnt.color = segmentColors[best]
+                        canvas.drawPoint(x.toFloat(), y.toFloat(), pnt)
                     }
                 }
 
-                /*────────── build seen‑objects summary ─────────*/
-                val seenObjects = seen.entries
-                    .filter { it.value > 20 }
-                    .sortedByDescending { it.value }
+                /*── compute centre‑line of sidewalk (bottom ¼ of frame) ─*/
+                var acc = 0f; var validRows = 0
+                for (y in (H * 0.75).toInt() until H) {
+                    var sumX = 0; var cnt = 0
+                    for (x in 0 until W) if (segmentBits[x][y] == SIDEWALK_ID) {
+                        sumX += x; cnt++
+                    }
+                    if (cnt > 10) { // ignore too‑sparse rows
+                        acc += sumX.toFloat() / cnt
+                        validRows++
+                    }
+                }
+                val centreX = if (validRows > 0) acc / validRows else W / 2f
+                val offsetPx = (W / 2f - centreX).toInt() // + if camera left of line
+
+                /*── draw centre‑line in mask ────────────────────────────*/
+                Paint().apply {
+                    color = Color.YELLOW; strokeWidth = 3f
+                }.also { canvas.drawLine(centreX, 0f, centreX, H.toFloat(), it) }
+
+                /*── build seen‑objects string ───────────────────────────*/
+                val seen = mutableMapOf<Int, Int>()
+                for (id in 1 until NUM_CLASSES) {
+                    var cnt = 0
+                    for (y in 0 until H) for (x in 0 until W)
+                        if (segmentBits[x][y] == id) cnt++
+                    if (cnt > 20) seen[id] = cnt
+                }
+                val seenStr = seen.entries.sortedByDescending { it.value }
                     .joinToString(", ") { labelMap[it.key] ?: "id=${'$'}{it.key}" }
 
-                /*────────── deliver result ─────────*/
+                /*── emit result ───────────────────────────────────────*/
                 resultNotifier.onNext(
                     SegmentationResults(
-                        tfResizeBilinear(maskBitmap, srcHeight, srcWidth, 0),
-                        seenObjects
+                        tfResizeBilinear(maskBmp, srcH, srcW, 0),
+                        seenStr, offsetPx
                     )
                 )
 
-                outputs.close()
-                inputTensor.close()
+                out.close(); inputTensor.close()
             }
-            Log.i(TAG, "ONNX segmentation in ${'$'}inferenceTime ms")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Segmentation error", t)
+            Log.d(TAG, "Frame segmented in ${'$'}infMs ms")
+        } catch (e: Exception) {
+            Log.e(TAG, "Segmentation error", e)
         } finally {
             image.close()
         }
     }
 
-    /*───────────────────────────────────────────────────────────────────────────*/
-    /*  Helpers                                                                  */
-    /*───────────────────────────────────────────────────────────────────────────*/
-    private fun tfResizeBilinear(src: Bitmap?, w: Int, h: Int, rotDeg: Int): Bitmap? {
+    /*──────────────────────────────────────────────────────────────────────*/
+    /*  Helpers                                                              */
+    /*──────────────────────────────────────────────────────────────────────*/
+    private fun tfResizeBilinear(src: Bitmap?, w: Int, h: Int, rot: Int): Bitmap? {
         if (src == null) return null
-        val m = Matrix().apply { postRotate(rotDeg.toFloat()) }
+        val m = Matrix().apply { postRotate(rot.toFloat()) }
         val tmp = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
         val dst = createBitmap(w, h)
         Canvas(dst).drawBitmap(tmp, Rect(0, 0, tmp.width, tmp.height), Rect(0, 0, w, h), null)
