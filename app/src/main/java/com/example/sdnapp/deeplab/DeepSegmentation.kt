@@ -27,7 +27,7 @@ import androidx.core.graphics.createBitmap
  *  * **Classes**: 10 (see `class_color.csv`)
  *  * **Output**: Mask bitmap + per‑frame centre‑line offset so that the UI can warn the user
  */
-class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
+class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,private val sensorH_mm: Float ) : ImageAnalysis.Analyzer {
 
     /*──────────────────────────────────────────────────────────────────────*/
     /*  Constants                                                           */
@@ -43,6 +43,10 @@ class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
         private const val CLASS_COLOR_FILE = "class_colors.csv"
         private const val SIDEWALK_ID = 2 // from CSV (row 2)
         private const val TAG = "DeepSegmentation"
+
+        private const val CYCLE_ID          = 6           // <-- row # for “cycle” in class_colors.csv
+        private const val REAL_CYCLE_H_MM   = 1050f      // average adult bicycle, tweak as you like
+        private const val WHITE_DOT_RADIUS = 4f      // px in mask bitmap
     }
 
     /*──────────────────────────────────────────────────────────────────────*/
@@ -51,7 +55,9 @@ class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
     data class SegmentationResults(
         val bitmapMask: Bitmap?,           // overlay with class colours + centre line
         val seenObjects: String,           // text summary of objects detected
-        val centerOffsetPx: Int            // + => user/camera is left of centre‑line, − => right
+        val centerOffsetPx: Int,            // + => user/camera is left of centre‑line, − => right
+
+        val cycleDistanceMm: Float?        // null if no cycle in view
     )
 
     /*──────────────────────────────────────────────────────────────────────*/
@@ -156,6 +162,38 @@ class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
                     }
                 }
 
+
+
+                /*── 🚲  Cycle bounding‑rows & distance ───────────────*/
+                var topCy = H; var bottomCy = -1
+                var leftCy = W; var rightCy = -1
+                for (y in 0 until H) {
+                    for (x in 0 until W) if (segmentBits[x][y] == CYCLE_ID) {
+                        if (y < topCy)    topCy    = y
+                        if (y > bottomCy) bottomCy = y
+                        if (x < leftCy)   leftCy   = x
+                        if (x > rightCy)  rightCy  = x
+                    }
+                }
+                val hasCycle = bottomCy >= topCy && rightCy >= leftCy
+                val cycleDistanceMm: Float? = if (hasCycle) {
+                    val maskH = bottomCy - topCy + 1           // px @ 640×800
+                    val scale = image.height.toFloat() / H
+                    val objFullH = maskH * scale               // px @ full-res
+                    (focalLenMm * REAL_CYCLE_H_MM * image.height) /
+                            (objFullH * sensorH_mm)
+                } else null
+
+                /*── white dot at cycle centroid ───────────────────────*/
+                if (hasCycle) {
+                    val cx = (leftCy + rightCy) / 2f
+                    val cy = (topCy + bottomCy) / 2f
+                    Paint().apply {
+                        color = Color.WHITE
+                        style = Paint.Style.FILL
+                    }.also { canvas.drawCircle(cx, cy, WHITE_DOT_RADIUS, it) }
+                }
+
                 /*── compute centre‑line of sidewalk (bottom ¼ of frame) ─*/
                 var acc = 0f; var validRows = 0
                 for (y in (H * 0.75).toInt() until H) {
@@ -188,12 +226,23 @@ class DeepSegmentation(assets: AssetManager) : ImageAnalysis.Analyzer {
                     .joinToString(", ") { labelMap[it.key] ?: "id=${'$'}{it.key}" }
 
                 /*── emit result ───────────────────────────────────────*/
-                resultNotifier.onNext(
-                    SegmentationResults(
-                        tfResizeBilinear(maskBmp, srcH, srcW, 0),
-                        seenStr, offsetPx
+//                if (cycleDistanceMm != null) {
+                    resultNotifier.onNext(
+                        SegmentationResults(
+                            tfResizeBilinear(maskBmp, srcH, srcW, 0),
+                            seenStr,
+                            offsetPx,
+                            cycleDistanceMm
+//                            if (cycleDistanceMm > 0) cycleDistanceMm else null
+                        )
                     )
-                )
+//                }
+//                resultNotifier.onNext(
+//                    SegmentationResults(
+//                        tfResizeBilinear(maskBmp, srcH, srcW, 0),
+//                        seenStr, offsetPx, null
+//                    )
+//                )
 
                 out.close(); inputTensor.close()
             }

@@ -1,8 +1,11 @@
 package com.example.sdnapp
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.location.Location
 import android.os.Bundle
 import android.os.Looper
@@ -159,7 +162,27 @@ class MainActivity : AppCompatActivity(),
         mask = findViewById(R.id.overlayView)
         labels = findViewById(R.id.segmentation_text)
 
-        imageSegmentationAnalyzer = DeepSegmentation(assets)
+
+        /* ---------- Camera-intrinsics lookup  ---------- */
+        val camMgr = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val backId = camMgr.cameraIdList.first { id ->
+            val chars = camMgr.getCameraCharacteristics(id)
+            chars.get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+        }
+        val chars = camMgr.getCameraCharacteristics(backId)
+        val sensorH_mm = chars.get(
+            CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE
+        )!!.height
+        val focal0_mm = chars.get(
+            CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+        )!![0]
+
+        imageSegmentationAnalyzer = DeepSegmentation(
+            assets,
+            focal0_mm,
+            sensorH_mm
+        )
         disposables.add(
             imageSegmentationAnalyzer.resultsObserver()
                 .doOnNext { Log.d(TAG, "Segmentation result emitted") }  // Debug log
@@ -168,6 +191,15 @@ class MainActivity : AppCompatActivity(),
                     mask.setImageBitmap(result.bitmapMask)
                     mask.invalidate()
                     labels.text = result.seenObjects
+
+                    /*  extra: show distance if the cycle is present  */
+                    result.cycleDistanceMm?.let { d ->
+                        Toast.makeText(
+                            this,
+                            String.format(Locale.US, "Bike ≈ %.1f m away", d / 1000f),
+                        Toast.LENGTH_SHORT
+                        ).show()
+                    }
 
                     val tolerance = 40            // px you consider “safe”
                     when {
@@ -216,7 +248,6 @@ class MainActivity : AppCompatActivity(),
             .setSessionToken(token)
             .setQuery(query)
             .build()
-
         placesClient.findAutocompletePredictions(req)
             .addOnSuccessListener { resp ->
                 val first = resp.autocompletePredictions.firstOrNull()
@@ -227,11 +258,11 @@ class MainActivity : AppCompatActivity(),
                     ).setSessionToken(token).build()
                     placesClient.fetchPlace(fetch)
                         .addOnSuccessListener { placeResp ->
-                            destLatLng = placeResp.place.latLng
+                            destLatLng = placeResp.place.location
                             findViewById<TextInputEditText>(R.id.destinationEditText)
-                                .setText(placeResp.place.name)
+                                .setText(placeResp.place.displayName)
                             tts.speak(
-                                "${placeResp.place.name} selected",
+                                "${placeResp.place.displayName} selected",
                                 TextToSpeech.QUEUE_ADD,
                                 null,
                                 "UTTER2"
