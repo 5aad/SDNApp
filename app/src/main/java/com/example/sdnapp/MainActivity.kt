@@ -52,15 +52,18 @@ import java.util.concurrent.Executors
 
 /** Data class for one navigation step. */
 private data class NavStep(val instruction: String, val latLng: LatLng)
+
 const val TAG = "DeeplabAndroid"
+
 class MainActivity : AppCompatActivity(),
     OnMapReadyCallback,
     TextToSpeech.OnInitListener {
-        // Segmentation camera activity
+    // Segmentation camera activity
     private val disposables = CompositeDisposable()
     private lateinit var viewFinder: PreviewView
     private lateinit var mask: ImageView
     private lateinit var labels: TextView
+    private lateinit var distancesText: TextView
     private lateinit var imageSegmentationAnalyzer: DeepSegmentation
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -70,10 +73,12 @@ class MainActivity : AppCompatActivity(),
     private lateinit var tts: TextToSpeech
     private var destLatLng: LatLng? = null
     private val httpClient = OkHttpClient()
+
     /** Queue of navigation steps. */
     private val navSteps = mutableListOf<NavStep>()
     private lateinit var locationRequest: LocationRequest
     private lateinit var locationCallback: LocationCallback
+
     /** ▶️ NEW — keep handles so we can erase old graphics. */
     private var currentRoutePolyline: Polyline? = null
     private var currentDestMarker: Marker? = null  // optional
@@ -157,8 +162,10 @@ class MainActivity : AppCompatActivity(),
             fetchAndRenderRoute(dest)
         }
 
+        distancesText = findViewById(R.id.distancesText)
+
 //      Segmentation camera activity
-        viewFinder= findViewById(R.id.previewView)
+        viewFinder = findViewById(R.id.previewView)
         mask = findViewById(R.id.overlayView)
         labels = findViewById(R.id.segmentation_text)
 
@@ -192,26 +199,43 @@ class MainActivity : AppCompatActivity(),
                     mask.invalidate()
                     labels.text = result.seenObjects
 
-                    /*  extra: show distance if the cycle is present  */
-                    result.cycleDistanceMm?.let { d ->
-                        Toast.makeText(
-                            this,
-                            String.format(Locale.US, "Bike ≈ %.1f m away", d / 1000f),
-                        Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    Log.d(
+                        TAG, String.format(
+                            Locale.US, "Seg latency: %.2f ms", result.latencyMs
+                        )
+                    )
 
-                    val tolerance = 40            // px you consider “safe”
+                    /*  extra: show distance if the cycle is present  */
+                    val all = result.distancesMm     // <-- note: .distances, not .distancesMm
+                        .entries
+                        .joinToString(separator = "\n") { (label, mm) ->
+                            String.format(
+                                Locale.US,
+                                "%s ≈ %.1f m away",
+                                label.capitalize(),
+                                mm / 1000f
+                            )
+                        }
+
+                    distancesText.text = all
+
+
+                    val tolerance = 60            // px you consider “safe”
                     when {
-                        result.centerOffsetPx >  tolerance ->
-                            Toast.makeText(this,
+
+                        result.centerOffsetPx > tolerance ->
+                            Toast.makeText(
+                                this,
                                 "You’re drifting right – move left ⟵",
-                                Toast.LENGTH_SHORT).show()
+                                Toast.LENGTH_SHORT
+                            ).show()
 
                         result.centerOffsetPx < -tolerance ->
-                            Toast.makeText(this,
+                            Toast.makeText(
+                                this,
                                 "You’re drifting left – move right ⟶",
-                                Toast.LENGTH_SHORT).show()
+                                Toast.LENGTH_SHORT
+                            ).show()
                     }
                 }
         )
@@ -243,7 +267,8 @@ class MainActivity : AppCompatActivity(),
      *  Place lookup
      * -------------------------------------------------- */
     private fun lookupPlace(query: String) {
-        val token = com.google.android.libraries.places.api.model.AutocompleteSessionToken.newInstance()
+        val token =
+            com.google.android.libraries.places.api.model.AutocompleteSessionToken.newInstance()
         val req = FindAutocompletePredictionsRequest.builder()
             .setSessionToken(token)
             .setQuery(query)
@@ -540,8 +565,14 @@ class MainActivity : AppCompatActivity(),
     /* -------------------------------------------------- *
      *  MapView + TTS lifecycle
      * -------------------------------------------------- */
-    override fun onResume() { super.onResume(); mapView.onResume() }
-    override fun onPause()  { mapView.onPause(); super.onPause() }
+    override fun onResume() {
+        super.onResume(); mapView.onResume()
+    }
+
+    override fun onPause() {
+        mapView.onPause(); super.onPause()
+    }
+
     override fun onDestroy() {
         disposables.clear()
         cameraExecutor.shutdown()
@@ -549,10 +580,15 @@ class MainActivity : AppCompatActivity(),
         mapView.onDestroy()
         super.onDestroy()
     }
-    override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
+
+    override fun onLowMemory() {
+        super.onLowMemory(); mapView.onLowMemory()
+    }
+
     override fun onSaveInstanceState(out: Bundle) {
         super.onSaveInstanceState(out); mapView.onSaveInstanceState(out)
     }
+
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) tts.language = Locale.getDefault()
     }

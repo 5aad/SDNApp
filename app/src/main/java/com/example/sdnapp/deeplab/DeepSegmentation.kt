@@ -13,21 +13,21 @@ import io.reactivex.subjects.PublishSubject
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtLoggingLevel
+import android.os.SystemClock
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
 import java.nio.FloatBuffer
 import kotlin.system.measureTimeMillis
 import androidx.core.graphics.createBitmap
+import java.util.Locale
 
-/**
- * Real‑time semantic segmentation using an **ONNX** model (`model.onnx`).
- *
- *  * **Input**: 640×800 RGB (NCHW)
- *  * **Classes**: 10 (see `class_color.csv`)
- *  * **Output**: Mask bitmap + per‑frame centre‑line offset so that the UI can warn the user
- */
-class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,private val sensorH_mm: Float ) : ImageAnalysis.Analyzer {
+class DeepSegmentation(
+    assets: AssetManager,
+    private val focalLenMm: Float,
+    private val sensorH_mm: Float
+) : ImageAnalysis.Analyzer {
 
     /*──────────────────────────────────────────────────────────────────────*/
     /*  Constants                                                           */
@@ -44,9 +44,18 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
         private const val SIDEWALK_ID = 2 // from CSV (row 2)
         private const val TAG = "DeepSegmentation"
 
-        private const val CYCLE_ID          = 6           // <-- row # for “cycle” in class_colors.csv
-        private const val REAL_CYCLE_H_MM   = 1050f      // average adult bicycle, tweak as you like
+        /* ── target IDs we want distances for ────────────────────────── */
+        private const val ID_CYCLE = 6   // "bicycle"
+        private const val ID_PERSON = 4   // "person" – example row, adjust to CSV
+
+        /** real‑world heights (mm) per target class */
+        private val REAL_HEIGHTS = mapOf(
+            ID_CYCLE to 800f,   // adult bike from tyre to handlebar
+            ID_PERSON to 1_700f   // average standing adult
+        )
         private const val WHITE_DOT_RADIUS = 4f      // px in mask bitmap
+
+        private const val LAT_WIN = 1                   // ★ NEW
     }
 
     /*──────────────────────────────────────────────────────────────────────*/
@@ -56,15 +65,22 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
         val bitmapMask: Bitmap?,           // overlay with class colours + centre line
         val seenObjects: String,           // text summary of objects detected
         val centerOffsetPx: Int,            // + => user/camera is left of centre‑line, − => right
-
-        val cycleDistanceMm: Float?        // null if no cycle in view
+        val distancesMm: Map<String, Float>,   // label → distance (mm)
+        val latencyMs: Float                             // ★ NEW
     )
 
     /*──────────────────────────────────────────────────────────────────────*/
     /*  ONNX Runtime setup                                                  */
     /*──────────────────────────────────────────────────────────────────────*/
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
+    private val env: OrtEnvironment =
+        OrtEnvironment.getEnvironment(OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO, "Ort")
     private val session: OrtSession
+
+    /*──────────────── rolling-average state ──────────────────────────────*/
+    private var accTimeMs = 0L                          // ★ NEW
+    private var accFrames = 0                           // ★ NEW
+    @Volatile
+    var avgLatency = 0f                        // ★ NEW  (readable from UI)
 
     /*──────────────────────────────────────────────────────────────────────*/
     /*  Buffers & look‑ups                                                  */
@@ -78,6 +94,9 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
     init {
         /*── load ONNX model ───────────────────────────────────────────────*/
         val bytes = assets.open(MODEL_FILENAME).readBytes()
+        val so = OrtSession.SessionOptions().apply {
+            addNnapi()
+        }
         session = env.createSession(bytes)
 
         /*── read CSV for colours / labels ─────────────────────────────────*/
@@ -106,6 +125,7 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
     /*──────────────────────────────────────────────────────────────────────*/
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(image: ImageProxy) {
+
         try {
             val srcW = image.width
             val srcH = image.height
@@ -141,6 +161,7 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
                 env, FloatBuffer.wrap(imgData), longArrayOf(1, 3, H.toLong(), W.toLong())
             )
             val infMs = measureTimeMillis {
+                val t0 = SystemClock.elapsedRealtimeNanos()      // ★ NEW – start stopwatch
                 val out = session.run(mapOf(inputName to inputTensor))
                 val logits = (out[0].value as Array<Array<Array<FloatArray>>>)[0] // [C][H][W]
 
@@ -149,55 +170,105 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
                 val canvas = Canvas(maskBmp)
                 val pnt = Paint().apply { strokeWidth = 1f }
 
+//                for (y in 0 until H) {
+//                    for (x in 0 until W) {
+//                        var best = 0; var bestScore = Float.NEGATIVE_INFINITY
+//                        for (c in 0 until NUM_CLASSES) {
+//                            val s = logits[c][y][x]
+//                            if (s > bestScore) { bestScore = s; best = c }
+//                        }
+//                        segmentBits[x][y] = best
+//                        pnt.color = segmentColors[best]
+//                        canvas.drawPoint(x.toFloat(), y.toFloat(), pnt)
+//                    }
+//                }
+
+
+                // prepare bounding arrays for each target class
+                val top = IntArray(NUM_CLASSES) { H }
+                val bottom = IntArray(NUM_CLASSES) { -1 }
+                val left = IntArray(NUM_CLASSES) { W }
+                val right = IntArray(NUM_CLASSES) { -1 }
+
                 for (y in 0 until H) {
                     for (x in 0 until W) {
-                        var best = 0; var bestScore = Float.NEGATIVE_INFINITY
+                        var best = 0;
+                        var bestScore = Float.NEGATIVE_INFINITY
                         for (c in 0 until NUM_CLASSES) {
                             val s = logits[c][y][x]
-                            if (s > bestScore) { bestScore = s; best = c }
+                            if (s > bestScore) {
+                                bestScore = s; best = c
+                            }
                         }
                         segmentBits[x][y] = best
                         pnt.color = segmentColors[best]
                         canvas.drawPoint(x.toFloat(), y.toFloat(), pnt)
+
+                        if (best in REAL_HEIGHTS.keys) {
+                            if (y < top[best]) top[best] = y
+                            if (y > bottom[best]) bottom[best] = y
+                            if (x < left[best]) left[best] = x
+                            if (x > right[best]) right[best] = x
+                        }
                     }
                 }
-
 
 
                 /*── 🚲  Cycle bounding‑rows & distance ───────────────*/
-                var topCy = H; var bottomCy = -1
-                var leftCy = W; var rightCy = -1
-                for (y in 0 until H) {
-                    for (x in 0 until W) if (segmentBits[x][y] == CYCLE_ID) {
-                        if (y < topCy)    topCy    = y
-                        if (y > bottomCy) bottomCy = y
-                        if (x < leftCy)   leftCy   = x
-                        if (x > rightCy)  rightCy  = x
+                val distancesMm = mutableMapOf<String, Float>()
+                REAL_HEIGHTS.forEach { (id, realH) ->
+                    if (bottom[id] >= top[id] && right[id] >= left[id]) {
+                        val maskHpx = bottom[id] - top[id] + 1
+                        val scale = image.height.toFloat() / H
+                        val fullHpx = maskHpx * scale
+                        val distMm = (focalLenMm * realH * image.height) /
+                                (fullHpx * sensorH_mm)
+                        labelMap[id]?.let { distancesMm[it] = distMm }
+
+                        // draw centroid marker in unique colour
+                        val cx = (left[id] + right[id]) / 2f
+                        val cy = (top[id] + bottom[id]) / 2f
+                        Paint().apply {
+                            color = Color.WHITE
+                            style = Paint.Style.FILL
+                        }.also { canvas.drawCircle(cx, cy, WHITE_DOT_RADIUS, it) }
                     }
                 }
-                val hasCycle = bottomCy >= topCy && rightCy >= leftCy
-                val cycleDistanceMm: Float? = if (hasCycle) {
-                    val maskH = bottomCy - topCy + 1           // px @ 640×800
-                    val scale = image.height.toFloat() / H
-                    val objFullH = maskH * scale               // px @ full-res
-                    (focalLenMm * REAL_CYCLE_H_MM * image.height) /
-                            (objFullH * sensorH_mm)
-                } else null
+//                var topCy = H; var bottomCy = -1
+//                var leftCy = W; var rightCy = -1
+//                for (y in 0 until H) {
+//                    for (x in 0 until W) if (segmentBits[x][y] == CYCLE_ID) {
+//                        if (y < topCy)    topCy    = y
+//                        if (y > bottomCy) bottomCy = y
+//                        if (x < leftCy)   leftCy   = x
+//                        if (x > rightCy)  rightCy  = x
+//                    }
+//                }
+//                val hasCycle = bottomCy >= topCy && rightCy >= leftCy
+//                val cycleDistanceMm: Float? = if (hasCycle) {
+//                    val maskH = bottomCy - topCy + 1           // px @ 640×800
+//                    val scale = image.height.toFloat() / H
+//                    val objFullH = maskH * scale               // px @ full-res
+//                    (focalLenMm * REAL_CYCLE_H_MM * image.height) /
+//                            (objFullH * sensorH_mm)
+//                } else null
 
                 /*── white dot at cycle centroid ───────────────────────*/
-                if (hasCycle) {
-                    val cx = (leftCy + rightCy) / 2f
-                    val cy = (topCy + bottomCy) / 2f
-                    Paint().apply {
-                        color = Color.WHITE
-                        style = Paint.Style.FILL
-                    }.also { canvas.drawCircle(cx, cy, WHITE_DOT_RADIUS, it) }
-                }
+//                if (hasCycle) {
+//                    val cx = (leftCy + rightCy) / 2f
+//                    val cy = (topCy + bottomCy) / 2f
+//                    Paint().apply {
+//                        color = Color.WHITE
+//                        style = Paint.Style.FILL
+//                    }.also { canvas.drawCircle(cx, cy, WHITE_DOT_RADIUS, it) }
+//                }
 
                 /*── compute centre‑line of sidewalk (bottom ¼ of frame) ─*/
-                var acc = 0f; var validRows = 0
+                var acc = 0f;
+                var validRows = 0
                 for (y in (H * 0.75).toInt() until H) {
-                    var sumX = 0; var cnt = 0
+                    var sumX = 0;
+                    var cnt = 0
                     for (x in 0 until W) if (segmentBits[x][y] == SIDEWALK_ID) {
                         sumX += x; cnt++
                     }
@@ -225,17 +296,33 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
                 val seenStr = seen.entries.sortedByDescending { it.value }
                     .joinToString(", ") { labelMap[it.key] ?: "id=${'$'}{it.key}" }
 
-                /*── emit result ───────────────────────────────────────*/
-//                if (cycleDistanceMm != null) {
-                    resultNotifier.onNext(
-                        SegmentationResults(
-                            tfResizeBilinear(maskBmp, srcH, srcW, 0),
-                            seenStr,
-                            offsetPx,
-                            cycleDistanceMm
-//                            if (cycleDistanceMm > 0) cycleDistanceMm else null
+
+                /* --------- 4. LATENCY rolling average ---------- */
+                val singleMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000f
+                accTimeMs += singleMs.toLong()
+                accFrames += 1
+                if (accFrames == LAT_WIN) {
+                    avgLatency = accTimeMs.toFloat() / LAT_WIN
+                    Log.i(
+                        TAG, String.format(
+                            Locale.US,
+                            "Avg ONNX latency = %.2f ms", avgLatency
                         )
                     )
+                    accTimeMs = 0L
+                    accFrames = 0
+                }
+
+                /*── emit result ───────────────────────────────────────*/
+                resultNotifier.onNext(
+                    SegmentationResults(
+                        tfResizeBilinear(maskBmp, srcH, srcW, 0),
+                        seenStr,
+                        offsetPx,
+                        distancesMm,
+                        avgLatency                                // ★ NEW
+                    )
+                )
 //                }
 //                resultNotifier.onNext(
 //                    SegmentationResults(
@@ -246,7 +333,6 @@ class DeepSegmentation(assets: AssetManager, private val focalLenMm: Float,priva
 
                 out.close(); inputTensor.close()
             }
-            Log.d(TAG, "Frame segmented in ${'$'}infMs ms")
         } catch (e: Exception) {
             Log.e(TAG, "Segmentation error", e)
         } finally {
