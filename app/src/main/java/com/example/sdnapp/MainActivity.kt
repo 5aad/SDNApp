@@ -29,6 +29,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.example.sdnapp.deeplab.DeepSegmentation
+import com.example.sdnapp.deeplab.DistanceAnnouncer
 import com.google.android.gms.location.*
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
@@ -82,6 +83,8 @@ class MainActivity : AppCompatActivity(),
     /** ▶️ NEW — keep handles so we can erase old graphics. */
     private var currentRoutePolyline: Polyline? = null
     private var currentDestMarker: Marker? = null  // optional
+    private lateinit var distanceAnnouncer: DistanceAnnouncer
+
 
     /* -------------------------------------------------- *
      *  Speech-recognition launcher
@@ -132,6 +135,12 @@ class MainActivity : AppCompatActivity(),
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync(this)
         tts = TextToSpeech(this, this)
+
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                distanceAnnouncer = DistanceAnnouncer(tts)
+            }
+        }
 
         if (!Places.isInitialized()) {
             Places.initialize(applicationContext, getString(R.string.google_maps_key))
@@ -205,50 +214,34 @@ class MainActivity : AppCompatActivity(),
                         )
                     )
 
-                    val all = result.distancesMm
-                        .entries
-                        .joinToString(separator = "\n") { (label, mm) ->
-                            // convert to metres
-                            val distM = mm / 1000f
-                            val displayDist = if (label.equals("person", ignoreCase = true)) {
-                                distM - 1.7f
-                            } else {
-                                distM - 0.8f
-                            }
-
-                            String.format(
-                                Locale.US,
-                                "%s is %.1f m away",
-                                label.replaceFirstChar { it.titlecase(Locale.US) },
-                                displayDist
-                            )
+                    val parts = result.distancesMm.entries.map { (label, mm) ->
+                        val distM = mm / 1000f
+                        val displayDist = if (label.equals("person", ignoreCase = true)) {
+                            distM - 1.7f
+                        } else {
+                            distM - 0.8f
                         }
-                    distancesText.text = all
-                    tts.speak(
-                        all,
-                        TextToSpeech.QUEUE_ADD,
-                        null,
-                        "DISTANCE_INFO"
-                    )
+                        String.format(
+                            Locale.US,
+                            "%s is %.1f m away",
+                            label.replaceFirstChar { it.titlecase(Locale.US) },
+                            displayDist
+                        )
+                    }.toMutableList()
 
+// 2. Append a drift warning if needed
                     val tolerance = 60
                     when {
                         result.centerOffsetPx > tolerance ->
-                            tts.speak(
-                                "You’re drifting right, move left.",
-                                TextToSpeech.QUEUE_ADD,  // also queued
-                                null,
-                                "DRIFT_WARNING"
-                            )
-
+                            parts += "move left."
                         result.centerOffsetPx < -tolerance ->
-                            tts.speak(
-                                "You’re drifting left, move right.",
-                                TextToSpeech.QUEUE_ADD,
-                                null,
-                                "DRIFT_WARNING"
-                            )
+                            parts += "move right."
                     }
+
+                    val message = parts.joinToString(separator = " ")
+                    distancesText.text = parts.joinToString(separator = "\n")
+
+                    distanceAnnouncer.announce(message)
                 }
         )
 
