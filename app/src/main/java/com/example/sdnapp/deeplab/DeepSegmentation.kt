@@ -214,7 +214,13 @@ class DeepSegmentation(
                 }
 
 
-                /*── 🚲  Cycle bounding‑rows & distance ───────────────*/
+                /*── 🚲   bounding‑rows & distance ───────────────*/
+                val boxPaint = Paint().apply {
+                    color = Color.RED
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2f
+                }
+
                 val distancesMm = mutableMapOf<String, Float>()
                 REAL_HEIGHTS.forEach { (id, realH) ->
                     if (bottom[id] >= top[id] && right[id] >= left[id]) {
@@ -232,6 +238,14 @@ class DeepSegmentation(
                             color = Color.WHITE
                             style = Paint.Style.FILL
                         }.also { canvas.drawCircle(cx, cy, WHITE_DOT_RADIUS, it) }
+                        // — **new**: draw the bounding box —
+                        canvas.drawRect(
+                            left[id].toFloat(),
+                            top[id].toFloat(),
+                            right[id].toFloat(),
+                            bottom[id].toFloat(),
+                            boxPaint
+                        )
                     }
                 }
 //                var topCy = H; var bottomCy = -1
@@ -323,13 +337,6 @@ class DeepSegmentation(
                         avgLatency                                // ★ NEW
                     )
                 )
-//                }
-//                resultNotifier.onNext(
-//                    SegmentationResults(
-//                        tfResizeBilinear(maskBmp, srcH, srcW, 0),
-//                        seenStr, offsetPx, null
-//                    )
-//                )
 
                 out.close(); inputTensor.close()
             }

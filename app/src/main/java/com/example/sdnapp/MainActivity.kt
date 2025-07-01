@@ -205,37 +205,49 @@ class MainActivity : AppCompatActivity(),
                         )
                     )
 
-                    /*  extra: show distance if the cycle is present  */
-                    val all = result.distancesMm     // <-- note: .distances, not .distancesMm
+                    val all = result.distancesMm
                         .entries
                         .joinToString(separator = "\n") { (label, mm) ->
+                            // convert to metres
+                            val distM = mm / 1000f
+                            val displayDist = if (label.equals("person", ignoreCase = true)) {
+                                distM - 1.7f
+                            } else {
+                                distM - 0.8f
+                            }
+
                             String.format(
                                 Locale.US,
-                                "%s ≈ %.1f m away",
-                                label.capitalize(),
-                                mm / 1000f
+                                "%s is %.1f m away",
+                                label.replaceFirstChar { it.titlecase(Locale.US) },
+                                displayDist
                             )
                         }
-
                     distancesText.text = all
+                    tts.speak(
+                        all,
+                        TextToSpeech.QUEUE_ADD,
+                        null,
+                        "DISTANCE_INFO"
+                    )
 
-
-                    val tolerance = 60            // px you consider “safe”
+                    val tolerance = 60
                     when {
-
                         result.centerOffsetPx > tolerance ->
-                            Toast.makeText(
-                                this,
-                                "You’re drifting right – move left ⟵",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            tts.speak(
+                                "You’re drifting right, move left.",
+                                TextToSpeech.QUEUE_ADD,  // also queued
+                                null,
+                                "DRIFT_WARNING"
+                            )
 
                         result.centerOffsetPx < -tolerance ->
-                            Toast.makeText(
-                                this,
-                                "You’re drifting left – move right ⟶",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            tts.speak(
+                                "You’re drifting left, move right.",
+                                TextToSpeech.QUEUE_ADD,
+                                null,
+                                "DRIFT_WARNING"
+                            )
                     }
                 }
         )
@@ -386,7 +398,7 @@ class MainActivity : AppCompatActivity(),
                                     dist
                                 )
                                 if (dist[0] < 20f) {
-                                    tts.speak(next.instruction, TextToSpeech.QUEUE_ADD, null, null)
+                                    tts.speak("${next.instruction}. Walk for approximately ${dist[0].toInt()} meters", TextToSpeech.QUEUE_ADD, null, null)
                                     navSteps.removeAt(0)
                                     if (navSteps.isEmpty()) {
                                         stopLocationUpdates()
