@@ -6,11 +6,20 @@
     <androidx.camera.view.PreviewView
         android:id="@+id/previewView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"/>
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"/>
 
     <ImageView
         android:id="@+id/overlayView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:scaleType="fitXY"/>
+        android:scaleType="centerCrop"/>
+
+    <TextView
+        android:id="@+id/segmentation_text"
+        style="@style/TextAppearance.AppCompat.Display1"
+        android:layout_width="209dp"
+        android:layout_height="105dp"
+        android:background="#77000000"
+        android:textColor="@android:color/white" />
 </FrameLayout>

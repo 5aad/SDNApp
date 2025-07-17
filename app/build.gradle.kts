@@ -40,6 +40,10 @@ android {
 }
 
 dependencies {
+//    implementation(libs.arsceneview)
+//    implementation (libs.core.v1410)
+    implementation (libs.rxandroid)
+    implementation (libs.rxjava)
     implementation (libs.play.services.maps)
     implementation (libs.play.services.places)
     implementation (libs.okhttp)
