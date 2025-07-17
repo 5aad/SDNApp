@@ -221,12 +221,16 @@ class MainActivity : AppCompatActivity(),
                         } else {
                             distM - 0.8f
                         }
-                        String.format(
-                            Locale.US,
-                            "%s is %.1f m away",
-                            label.replaceFirstChar { it.titlecase(Locale.US) },
-                            displayDist
-                        )
+                        if (displayDist <= 5f) {
+                            String.format(
+                                Locale.US,
+                                "%s is %.1f m away",
+                                label.replaceFirstChar { it.titlecase(Locale.US) },
+                                displayDist
+                            )
+                        }else{
+                            ""
+                        }
                     }.toMutableList()
 
 // 2. Append a drift warning if needed
@@ -237,6 +241,7 @@ class MainActivity : AppCompatActivity(),
                         result.centerOffsetPx < -tolerance ->
                             parts += "move right."
                     }
+
 
                     val message = parts.joinToString(separator = " ")
                     distancesText.text = parts.joinToString(separator = "\n")
